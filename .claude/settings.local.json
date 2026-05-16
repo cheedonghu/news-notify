@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell(Move-Item -Path cmd\\\\news2tg -Destination cmd\\\\news-notify)",
+      "Bash(go build *)"
+    ]
+  }
+}

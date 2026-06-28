@@ -4,9 +4,10 @@
 package main
 
 import (
-	"context"   // 上下文：传 cancel/超时
-	"fmt"       // 格式化输出
-	"log/slog"  // Go 1.21+ 官方结构化日志
+	"context"  // 上下文：传 cancel/超时
+	"fmt"      // 格式化输出
+	"log/slog" // Go 1.21+ 官方结构化日志
+	"net"
 	"net/http"  // HTTP 客户端
 	"os"        // 进程相关：os.Stderr / os.Exit / os.Interrupt
 	"os/signal" // 监听系统信号（Ctrl-C 等）
@@ -22,6 +23,15 @@ import (
 	"github.com/cheedonghu/news-notify/internal/tools"
 )
 
+// 初始化slog
+func init() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{
+		Level:     slog.LevelInfo,
+		AddSource: false,
+	}))
+	slog.SetDefault(logger)
+}
+
 // main 是 Go 程序的唯一入口。无参数、无返回值。
 // 程序退出有两种方式：main 自然返回 / 调 os.Exit(code)。
 // 注意：os.Exit 不会触发 defer！只有正常 return 才会。
@@ -32,8 +42,7 @@ func main() {
 	// 2) 加载 TOML 配置；失败直接打印 + 退出码 1
 	cfg, err := config.FromFile(cli.Config)
 	if err != nil {
-		// Fprintf 把格式化结果写到指定 io.Writer；这里写 stderr。
-		fmt.Fprintf(os.Stderr, "Failed to load config: %v\n", err)
+		slog.Error("failed to load config", "err", err)
 		os.Exit(1)
 	}
 
@@ -41,14 +50,14 @@ func main() {
 	// strconv.ParseInt(s, 进制, 位宽)，返回 (int64, error)。
 	chatID, err := strconv.ParseInt(cfg.Telegram.ChatID, 10, 64)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Invalid Tg chat id: %v\n", err)
+		slog.Error("invalid tg chat id", "err", err)
 		os.Exit(1)
 	}
 
 	// 4) 初始化 Telegram 客户端（内部会真正去连一次 bot API 验证 token）
 	tgClient, err := notify.NewTelegram(cfg.Telegram.APIToken, chatID)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "init telegram: %v\n", err)
+		slog.Error("failed to init telegram", "err", err)
 		os.Exit(1)
 	}
 
@@ -57,7 +66,7 @@ func main() {
 		"news-notify启动完成，监控任务开始投递内容。\n启动时间：[%s]\n项目地址：https://github.com/cheedonghu/news-notify",
 		time.Now().Format("2006-01-02 15:04"), // Go 的"魔法时间格式"，固定写这串数字
 	)
-	fmt.Println(startupText)
+	slog.Info(startupText)
 
 	// 6) 创建一个能被信号取消的 ctx：
 	//    - signal.NotifyContext 监听 Interrupt（Ctrl-C）和 SIGTERM
@@ -69,16 +78,26 @@ func main() {
 
 	// 7) 把启动文案推给 Telegram。EscapeMarkdownV2 把特殊字符做转义。
 	if err := tgClient.Notify(ctx, tools.EscapeMarkdownV2(startupText)); err != nil {
-		fmt.Fprintf(os.Stderr, "Failed to send startup notification: %v\n", err)
+		slog.Error("failed to send startup notification")
 	}
 
 	// 8) 共享 HTTP 客户端：连接池、超时配置全集中在这里。
 	// &http.Client{...} 取地址：拿到 *http.Client 指针，方便共享同一个连接池。
 	// todo 这里连接池参数有问题，待优化
 	httpClient := &http.Client{
-		Timeout: 5 * time.Minute, // 整个请求总超时
+		//Timeout: 5 * time.Minute, // 整个请求总超时
 		Transport: &http.Transport{
-			ResponseHeaderTimeout: 2 * time.Minute, // 等响应头的超时
+			MaxIdleConns:        50,
+			MaxIdleConnsPerHost: 5, // 仍然要配，复用连接省握手
+			IdleConnTimeout:     150 * time.Second,
+
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second, // 建连仍然短！故障快速失败
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+
+			ResponseHeaderTimeout: 180 * time.Second, // 看是否流式调整：流式可短，非流式要长
+			ForceAttemptHTTP2:     false,
 		},
 	}
 
@@ -118,7 +137,7 @@ func main() {
 					cancel() // 触发其它 monitor 的 ctx.Done()，连锁退出
 				} else {
 					// 被外部取消的正常退出，仅打印
-					fmt.Printf("%s monitor stopped: %v\n", item.name, err)
+					slog.Error("monitor stopped", "name", item.name, "err", err)
 				}
 			}
 		}()
@@ -126,7 +145,7 @@ func main() {
 
 	// 12) 主 goroutine 阻塞在 ctx.Done() 上，直到收到信号或 cancel。
 	<-ctx.Done()
-	fmt.Println("Received shutdown signal, terminating...")
+	slog.Info("received shutdown signal, terminating...")
 	// 等所有 monitor goroutine 退出
 	wg.Wait()
 }

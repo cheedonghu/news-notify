@@ -3,6 +3,7 @@ package monitor
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -191,12 +192,12 @@ func (m *HackerNews) fetchIDs(ctx context.Context, fetchURL string) ([]string, e
 func (m *HackerNews) process(ctx context.Context, id string, timeGap int) *model.NotifyBase {
 	if m.alreadyPushed(id) {
 		// fmt.Printf 直接打印到 stdout（这里没用 slog 是历史原因，可以统一）
-		fmt.Printf("当前id:%s 已推送\n", id)
+		slog.Info("消息已经推送过", "id", id)
 		return nil
 	}
 
-	now := time.Now()
-	fmt.Printf("%s 开始解析id: %s\n", now.Format("2006年01月02日 15:04:05"), id)
+	slog.Info("消息开始解析", "id", id)
+	//fmt.Printf("%s 开始解析id: %s\n", now.Format("2006年01月02日 15:04:05"), id)
 
 	// fmt.Sprintf：拼字符串。%s 是占位符，对应后面的 id。
 	pageURL := fmt.Sprintf(hnItemURL, id)
@@ -232,7 +233,7 @@ func (m *HackerNews) process(ctx context.Context, id string, timeGap int) *model
 		out.ContentTransferedByAIFlag = true
 	}
 
-	m.markPushed(id, now.Format("20060102"))
+	m.markPushed(id)
 	return out
 }
 
@@ -258,7 +259,8 @@ func (m *HackerNews) httpGetText(ctx context.Context, target string) (string, er
 
 // getDigestFromPython 调本机 sidecar 拿正文。
 func (m *HackerNews) getDigestFromPython(ctx context.Context, originNewsURL string) (string, error) {
-	fmt.Printf("%s 开始获取源网址摘要\n", time.Now().Format("2006年01月02日 15:04:05"))
+	//fmt.Printf("%s 开始获取源网址摘要\n", time.Now().Format("2006年01月02日 15:04:05"))
+	slog.Info("开始获取源网址摘要", "originNewsURL", originNewsURL)
 
 	// url.Parse 把字符串解析成 *url.URL，方便安全拼参数。
 	u, err := url.Parse(hnDigestURL)
@@ -337,7 +339,8 @@ func (m *HackerNews) alreadyPushed(id string) bool {
 	return ok
 }
 
-func (m *HackerNews) markPushed(id, date string) {
+func (m *HackerNews) markPushed(id string) {
+	date := time.Now().Format("20060102")
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pushedURLs[id] = date
@@ -362,13 +365,15 @@ func (m *HackerNews) cleanOldURLs(now time.Time) {
 //   - 只认 "hours" 单位；"minutes" / "days" 一律返回 false；
 //   - 多个 span.age 时取第一个满足条件的，找不到就 false。
 func judgeNewsDate(htmlBody string, timeGap int) bool {
-	now := time.Now()
-	fmt.Printf("%s 开始判断帖子日期是否在范围内\n", now.Format("2006年01月02日 15:04:05"))
+	//now := time.Now()
+	//fmt.Printf("%s 开始判断帖子日期是否在范围内\n", now.Format("2006年01月02日 15:04:05"))
+	slog.Info("开始判断帖子日期是否在范围内")
 
 	// goquery 从 io.Reader 解析；strings.NewReader 把字符串包成 Reader。
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlBody))
 	if err != nil {
-		fmt.Println("解析HN帖子HTML失败")
+		//fmt.Println("解析HN帖子HTML失败")
+		slog.Error("解析HN帖子HTML失败")
 		return false
 	}
 
@@ -399,14 +404,16 @@ func judgeNewsDate(htmlBody string, timeGap int) bool {
 	if lastTitleTime == "" {
 		lastTitleTime = "帖子日期获取失败"
 	}
-	fmt.Printf("帖子日期: %s 不符合推送要求\n", lastTitleTime)
+	//fmt.Printf("帖子日期: %s 不符合推送要求\n", lastTitleTime)
+	slog.Info("帖子日期不符合推送要求", "lastTitleTime", lastTitleTime)
 	return false
 }
 
 // getNewsOriginURL 从 HN 帖子页提取原文链接。
 // 返回 "" + nil 表示"没找到 / 格式异常"，调用方据此跳过。
 func getNewsOriginURL(htmlBody string) (string, error) {
-	fmt.Printf("%s 开始解析源网址\n", time.Now().Format("2006年01月02日 15:04:05"))
+	//fmt.Printf("%s 开始解析源网址\n", time.Now().Format("2006年01月02日 15:04:05"))
+	slog.Info("开始解析源网址")
 
 	doc, err := goquery.NewDocumentFromReader(strings.NewReader(htmlBody))
 	if err != nil {
@@ -416,20 +423,21 @@ func getNewsOriginURL(htmlBody string) (string, error) {
 	// Find 返回的是匹配集合；First 取第一个
 	sel := doc.Find("span.titleline a").First()
 	if sel.Length() == 0 {
-		fmt.Println("span.titleline a 没找到对应内容")
-		return "", nil
+		//fmt.Println("span.titleline a 没找到对应内容")
+		return "", errors.New("span.titleline a 没找到对应内容")
 	}
 	// Attr 返回"属性值, 是否存在"；ok==false 表示这个属性根本不存在
 	href, ok := sel.Attr("href")
 	if !ok {
-		fmt.Println("未找到源网址")
-		return "", nil
+		//fmt.Println("未找到源网址")
+		return "", errors.New("未找到源网址")
 	}
-	fmt.Printf("识别到的源网址为: %s\n", href)
+	//fmt.Printf("识别到的源网址为: %s\n", href)
+	slog.Info("识别到的源网址为", "href", href)
 	// 兜底：相对路径如 "item?id=..." 不算外链，跳过。
 	if !strings.HasPrefix(href, "http") {
-		fmt.Println("识别到的源网址格式异常")
-		return "", nil
+		//fmt.Println("识别到的源网址格式异常")
+		return "", errors.New("识别到的源网址格式异常")
 	}
 	return href, nil
 }

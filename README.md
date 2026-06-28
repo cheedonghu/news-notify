@@ -43,6 +43,3 @@ go build -o bin/news-notify ./cmd/news-notify
 - HN 正文提取：仍由 Python sidecar [hacker-news-digest](https://github.com/cheedonghu/hacker-news-digest) 提供，通过 `127.0.0.1:50051` HTTP 调用
 
 ## todo
-1. v2ex支持关键字
-2. hackernews支持AI总结的开关
-3. hackernews使用ollama 7b大模型

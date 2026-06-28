@@ -40,8 +40,8 @@ func (t *Telegram) Notify(ctx context.Context, content string) error {
 
 	// bot.Send 返回 (Message, error)；这里不关心成功的 Message，用 _ 丢弃。
 	if _, err := t.bot.Send(msg); err != nil {
-		slog.Error("telegram推送失败", "err", err)
-		return fmt.Errorf("telegram推送失败: %w", err)
+		slog.Error("telegram单笔信息推送失败", "err", err)
+		return fmt.Errorf("telegram单笔信息推送失败: %w", err)
 	}
 	return nil
 }
@@ -51,12 +51,13 @@ func (t *Telegram) Notify(ctx context.Context, content string) error {
 // 注意：单条失败只记日志、不中断；ctx 取消才返回。
 func (t *Telegram) NotifyBatch(ctx context.Context, contents []string) error {
 	for _, content := range contents {
-		fmt.Println(content) // 顺便也打印到 stdout，调试用
+		//fmt.Println(content) // 顺便也打印到 stdout，调试用
+		slog.Info(content)
 		msg := tgbotapi.NewMessage(t.chatID, content)
 		msg.ParseMode = tgbotapi.ModeMarkdownV2
 		msg.DisableWebPagePreview = false
 		if _, err := t.bot.Send(msg); err != nil {
-			slog.Error("telegram推送失败", "err", err)
+			slog.Error("telegram批量信息推送失败", "err", err)
 			// 注意：这里没 return，继续发下一条
 		}
 

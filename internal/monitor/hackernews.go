@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url" // 注意：和上面 import 的 "url" 形参/局部变量不冲突；包名 url 在本文件作为 url.Parse 用
 	"strconv" // 字符串和数字互转
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/cheedonghu/news-notify/internal/ai"
 	"github.com/cheedonghu/news-notify/internal/config"
+	"github.com/cheedonghu/news-notify/internal/digest"
 	"github.com/cheedonghu/news-notify/internal/model"
 	"github.com/cheedonghu/news-notify/internal/notify"
 	"github.com/cheedonghu/news-notify/internal/tools"
@@ -27,12 +27,12 @@ import (
 // Hacker News 相关端点说明：
 //   - hnTopURL / hnNewURL  Firebase 官方 API，只返回 ID 数组
 //   - hnItemURL            网页版帖子页，用来抓"几小时前发布"和"原文链接"（API 不带这些文案）
-//   - hnDigestURL          同进程的 Python sidecar，负责正文抽取
+//
+// 正文抽取的端点已抽到 digest 包（digest.Fetcher 接口 + Python 实现）。
 const (
 	hnTopURL    = "https://hacker-news.firebaseio.com/v0/topstories.json?print=pretty"
 	hnNewURL    = "https://hacker-news.firebaseio.com/v0/newstories.json?print=pretty"
 	hnItemURL   = "https://news.ycombinator.com/item?id=%s" // %s 是 Sprintf 的占位符
-	hnDigestURL = "http://127.0.0.1:50051/digest"
 	hnUserAgent = "PostmanRuntime/7.37.3"
 )
 
@@ -41,19 +41,21 @@ const (
 type HackerNews struct {
 	httpClient *http.Client
 	notifier   notify.Notifier
-	ai         ai.Helper // 接口类型，运行时是 *ai.DeepSeek 的实例
+	ai         ai.Helper      // 接口类型，运行时是 *ai.DeepSeek 的实例
+	digest     digest.Fetcher // 接口类型，运行时是 *digest.Python 的实例（后续可换 agent 渠道）
 
 	mu         sync.RWMutex
 	pushedURLs map[string]string // id（不是 URL！HN 用 ID 标识）→ yyyymmdd
 }
 
 // NewHackerNews 构造函数。
-// 参数 aiHelper 用接口类型，便于测试时传 mock；返回 *HackerNews 指针。
-func NewHackerNews(httpClient *http.Client, notifier notify.Notifier, aiHelper ai.Helper) *HackerNews {
+// 参数 aiHelper / digestFetcher 都用接口类型，便于测试时传 mock、便于日后换实现；返回 *HackerNews 指针。
+func NewHackerNews(httpClient *http.Client, notifier notify.Notifier, aiHelper ai.Helper, digestFetcher digest.Fetcher) *HackerNews {
 	return &HackerNews{
 		httpClient: httpClient,
 		notifier:   notifier,
 		ai:         aiHelper,
+		digest:     digestFetcher,
 		pushedURLs: make(map[string]string), // map 必须 make
 	}
 }
@@ -222,14 +224,15 @@ func (m *HackerNews) process(ctx context.Context, id string, timeGap int) *model
 		OriginURL: originURL,
 	}
 
-	digest, err := m.getDigestFromPython(ctx, originURL)
+	// 局部变量取名 content，避免和 import 进来的 digest 包名冲突。
+	content, err := m.digest.Fetch(ctx, originURL)
 	if err != nil {
 		slog.Error("网页摘要获取失败", "err", err)
 		// flag 置 false：后续 aiTransfer 不会再调 AI，省一次失败调用。
 		out.ContentTransferedByAIFlag = false
 		out.Content = "网页摘要获取失败"
 	} else {
-		out.Content = digest
+		out.Content = content
 		out.ContentTransferedByAIFlag = true
 	}
 
@@ -254,38 +257,6 @@ func (m *HackerNews) httpGetText(ctx context.Context, target string) (string, er
 		return "", err
 	}
 	// []byte → string 的显式转换
-	return string(body), nil
-}
-
-// getDigestFromPython 调本机 sidecar 拿正文。
-func (m *HackerNews) getDigestFromPython(ctx context.Context, originNewsURL string) (string, error) {
-	//fmt.Printf("%s 开始获取源网址摘要\n", time.Now().Format("2006年01月02日 15:04:05"))
-	slog.Info("开始获取源网址摘要", "originNewsURL", originNewsURL)
-
-	// url.Parse 把字符串解析成 *url.URL，方便安全拼参数。
-	u, err := url.Parse(hnDigestURL)
-	if err != nil {
-		return "", err
-	}
-	// 取 query，加参数，再写回。url.Values 是 map[string][]string 的别名。
-	q := u.Query()
-	q.Set("newsUrl", originNewsURL)
-	u.RawQuery = q.Encode() // Encode 会自动做 URL escape
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("调用 python 接口获取帖子摘要失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", fmt.Errorf("提取摘要文本失败: %w", err)
-	}
 	return string(body), nil
 }
 

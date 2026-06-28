@@ -18,6 +18,7 @@ import (
 
 	"github.com/cheedonghu/news-notify/internal/ai"
 	"github.com/cheedonghu/news-notify/internal/config"
+	"github.com/cheedonghu/news-notify/internal/digest"
 	"github.com/cheedonghu/news-notify/internal/monitor"
 	"github.com/cheedonghu/news-notify/internal/notify"
 	"github.com/cheedonghu/news-notify/internal/tools"
@@ -83,7 +84,6 @@ func main() {
 
 	// 8) 共享 HTTP 客户端：连接池、超时配置全集中在这里。
 	// &http.Client{...} 取地址：拿到 *http.Client 指针，方便共享同一个连接池。
-	// todo 这里连接池参数有问题，待优化
 	httpClient := &http.Client{
 		//Timeout: 5 * time.Minute, // 整个请求总超时
 		Transport: &http.Transport{
@@ -103,7 +103,8 @@ func main() {
 
 	// 9) 构造各个组件
 	aiClient := ai.NewDeepSeek(cfg.DeepSeek.APIToken)
-	hnMon := monitor.NewHackerNews(httpClient, tgClient, aiClient)
+	digestFetcher := digest.NewPython(httpClient) // 当前用 Python sidecar；后续可换 agent 渠道
+	hnMon := monitor.NewHackerNews(httpClient, tgClient, aiClient, digestFetcher)
 	v2exMon := monitor.NewV2EX(httpClient, tgClient)
 
 	// 10) 把所有 monitor 收到一张表里，便于循环启动 goroutine。
